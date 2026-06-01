@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy to config.local.json (gitignored) and fill machine-specific values. NO absolute paths in committed code — they live here only.",
+  "machineId": "REPLACE-with-win-or-mac",
+  "claudeConfigDir": "",
+  "plan": { "limit5hUSD": 28, "limit7dUSD": 400 },
+  "gate": {
+    "tz": "Asia/Seoul",
+    "workStartHHMM": "09:30",
+    "workEndHHMM": "21:00",
+    "workCapPct": 0.50,
+    "weeklyStopPct": 0.80,
+    "resetByHHMM": "10:00"
+  },
+  "controlFile": "./automation-control.json",
+  "stopFlag": "./STOP",
+  "peer": { "enabled": false, "sshHost": "", "remoteRepoPath": "" }
+}

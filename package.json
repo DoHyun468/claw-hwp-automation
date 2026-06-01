@@ -1,0 +1,11 @@
+{
+  "name": "claw-hwp-automation",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "claw-hwp 자동화 오케스트레이터 — usage-gated, queue-driven, cross-worktree (design: ../handoff/AUTOMATION_DESIGN.md)",
+  "scripts": {
+    "gate": "node scripts/usage-gate.mjs",
+    "report": "node scripts/usage-gate.mjs --report"
+  }
+}

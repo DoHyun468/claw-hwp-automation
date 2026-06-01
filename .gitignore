@@ -1,0 +1,6 @@
+node_modules/
+config.local.json
+automation-control.json
+STOP
+*.log
+.DS_Store
