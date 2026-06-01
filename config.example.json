@@ -2,7 +2,7 @@
   "_comment": "Copy to config.local.json (gitignored) and fill machine-specific values. NO absolute paths in committed code — they live here only.",
   "machineId": "REPLACE-with-win-or-mac",
   "claudeConfigDir": "",
-  "plan": { "limit5hUSD": 28, "limit7dUSD": 400 },
+  "plan": { "limit5hUSD": 47, "limit7dUSD": 465 },
   "gate": {
     "tz": "Asia/Seoul",
     "workStartHHMM": "09:30",
