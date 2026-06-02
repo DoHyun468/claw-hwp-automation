@@ -13,5 +13,12 @@
   },
   "controlFile": "./automation-control.json",
   "stopFlag": "./STOP",
-  "peer": { "enabled": false, "sshHost": "", "remoteRepoPath": "" }
+  "peer": { "enabled": false, "sshHost": "", "remoteRepoPath": "" },
+  "coldVerify": {
+    "claudeBin": "claude",
+    "model": "opus",
+    "extraArgs": ["--permission-mode", "bypassPermissions"],
+    "timeoutMs": 600000,
+    "captureCmd": ""
+  }
 }
