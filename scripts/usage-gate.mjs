@@ -1,21 +1,32 @@
 #!/usr/bin/env node
 /**
- * usage-gate.mjs — claw-hwp automation usage gate.
+ * usage-gate.mjs — claw-hwp automation usage gate (v2: OAuth usage endpoint).
  *
- * Reads local Claude usage via ccusage (COST-based — raw token totals are inflated
- * by cache reads, so cost tracks the /usage % linearly), computes % vs plan limits,
- * optionally sums a peer machine's usage over SSH, applies the gate policy, prints a
- * decision JSON.  OS-agnostic: NO hardcoded absolute paths — machine-specific values
- * come from a gitignored config.local.json (see config.example.json) + env.
- * Calibrated 2026-06-01: 5h ≈ $28, 7d ≈ $400 (see ../handoff/AUTOMATION_DESIGN.md §5).
+ * Reads ACCOUNT-WIDE usage % straight from Anthropic's OAuth usage endpoint
+ * (`/api/oauth/usage`) — the exact data behind Claude Code's `/usage`. Because it
+ * is server-side, it already includes EVERY machine + every concurrent session,
+ * so there is no per-machine blind spot and no $→% calibration to drift.
+ *
+ *   Old (v1, removed): ccusage local cost ($) + SSH peer-sum + $ plan limits.
+ *   Why replaced: ccusage reads only THIS machine's JSONL, so it under-counted
+ *   cross-machine usage (5h read ~1% while /usage was 15%), and the $→% mapping
+ *   drifted with cache-read pricing / model mix (7d read 57% while /usage was 31%).
+ *   The OAuth endpoint matched /usage exactly (5h/7d % AND reset times). See
+ *   ../handoff/AUTOMATION_DESIGN.md §5.
+ *
+ * OS-agnostic. NO hardcoded absolute paths: the OAuth token comes from
+ *   - $CLAUDE_CONFIG_DIR/.credentials.json   (Windows / Linux), or
+ *   - macOS login Keychain ("Claude Code-credentials")  (darwin),
+ *   - or an explicit `credentialsFile` / `credentialsCommand` in config.local.json.
+ * All other machine-specific values live in gitignored config.local.json.
  *
  * Modes:
  *   (default)  print full gate decision  { gate: go|pause|stop, reason, ... }
- *   --report   print only this machine's { cost5hUSD, cost7dUSD }  (peer calls this over SSH)
+ *   --report   print only raw utilization { util5h, util7d }  (debug)
  */
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, platform } from 'node:os';
 import { join, isAbsolute, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -37,14 +48,7 @@ const cfg = (() => {
 })();
 const resolve = p => (!p ? p : isAbsolute(p) ? p : join(repoRoot, p));
 const hhmm = s => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
-
-const ccEnv = () => ({
-  ...process.env,
-  CLAUDE_CONFIG_DIR: cfg.claudeConfigDir || process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'),
-});
-const ccusage = argStr =>
-  JSON.parse(execSync(`npx -y ccusage@latest ${argStr}`, { encoding: 'utf8', env: ccEnv(), stdio: ['ignore', 'pipe', 'ignore'] }));
-const ymd = d => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+const configDir = cfg.claudeConfigDir || process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
 
 // minutes-of-day in a tz for a given Date (default now)
 const tzMin = (tz, when = new Date()) => {
@@ -54,31 +58,48 @@ const tzMin = (tz, when = new Date()) => {
   return (+p.hour % 24) * 60 + +p.minute;
 };
 
-function localUsage() {
-  let cost5hUSD = 0, blockEndTime = null;
-  try {
-    const b = ccusage('blocks --active --json').blocks?.[0];
-    if (b && b.isActive) { cost5hUSD = b.costUSD || 0; blockEndTime = b.endTime || null; }
-  } catch { /* no active block / ccusage unavailable */ }
-  let cost7dUSD = 0;
-  try {
-    const days = ccusage(`daily --json --since ${ymd(new Date(Date.now() - 7 * 864e5))}`).daily || [];
-    cost7dUSD = days.reduce((s, d) => s + (d.totalCost || 0), 0);
-  } catch { /* ignore */ }
-  return { cost5hUSD: +cost5hUSD.toFixed(4), cost7dUSD: +cost7dUSD.toFixed(4), blockEndTime };
+// --- OAuth token discovery (OS-agnostic, no absolute paths in committed code) ---
+function accessToken() {
+  const fromJson = s => JSON.parse(s)?.claudeAiOauth?.accessToken;
+  // 1) explicit command escape hatch (e.g. a secrets manager)
+  if (cfg.credentialsCommand) {
+    const out = execSync(cfg.credentialsCommand, { encoding: 'utf8' }).trim();
+    return out.startsWith('{') ? fromJson(out) : out;
+  }
+  // 2) explicit file, or the standard per-config-dir credentials file (Win/Linux)
+  const f = cfg.credentialsFile ? resolve(cfg.credentialsFile) : join(configDir, '.credentials.json');
+  if (existsSync(f)) return fromJson(readFileSync(f, 'utf8'));
+  // 3) macOS Keychain (Claude Code stores creds here, not in a file)
+  if (platform() === 'darwin') {
+    const out = execFileSync('security',
+      ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+      { encoding: 'utf8' }).trim();
+    return fromJson(out);
+  }
+  throw new Error(`no Claude credentials found (looked in ${f}${platform() === 'darwin' ? ' + Keychain' : ''})`);
 }
 
-function peerUsage() {
-  if (!cfg.peer?.enabled) return { ok: false, reason: 'disabled', cost5hUSD: 0, cost7dUSD: 0 };
+// claude-code/<version> User-Agent is REQUIRED — without it the endpoint uses an
+// aggressively rate-limited bucket and returns persistent 429s.
+function userAgent() {
   try {
-    const out = execSync(`ssh ${cfg.peer.sshHost} "node ${cfg.peer.remoteRepoPath}/scripts/usage-gate.mjs --report"`,
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20000 });
-    const j = JSON.parse(out);
-    return { ok: true, cost5hUSD: j.cost5hUSD || 0, cost7dUSD: j.cost7dUSD || 0 };
-  } catch {
-    // conservative: assume peer is consuming its share of the 5h budget
-    return { ok: false, reason: 'unreachable', cost5hUSD: cfg.plan.limit5hUSD * cfg.gate.workCapPct, cost7dUSD: 0 };
-  }
+    const v = (execSync('claude --version', { encoding: 'utf8' }).match(/[0-9]+\.[0-9]+\.[0-9]+/) || [])[0];
+    if (v) return `claude-code/${v}`;
+  } catch { /* fall through */ }
+  return 'claude-code/2.0.0';
+}
+
+async function fetchUsage() {
+  const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
+    headers: {
+      Authorization: `Bearer ${accessToken()}`,
+      'anthropic-beta': 'oauth-2025-04-20',
+      'User-Agent': userAgent(),
+      'Content-Type': 'application/json',
+    },
+  });
+  if (!res.ok) throw new Error(`usage endpoint HTTP ${res.status} (token expired? run any claude command to refresh)`);
+  return res.json();
 }
 
 function readControl() {
@@ -91,34 +112,39 @@ function readControl() {
   } catch { return { mode: 'auto' }; }
 }
 
-function decide() {
+async function decide() {
   const stop = resolve(cfg.stopFlag);
   if (stop && existsSync(stop)) return { gate: 'stop', reason: 'STOP flag present' };
 
-  const local = localUsage();
-  const peer = peerUsage();
-  const cost5h = local.cost5hUSD + peer.cost5hUSD;
-  const cost7d = local.cost7dUSD + peer.cost7dUSD;
-  const pct5h = cost5h / cfg.plan.limit5hUSD;
-  const pct7d = cost7d / cfg.plan.limit7dUSD;
+  let u;
+  try { u = await fetchUsage(); }
+  catch (e) {
+    // fail-safe: if usage can't be read, PAUSE (conservative) rather than blindly go
+    return { gate: 'pause', reason: `usage fetch failed — fail-safe pause: ${e.message}`, error: String(e.message) };
+  }
+
+  const util5h = u.five_hour?.utilization ?? 0;
+  const util7d = u.seven_day?.utilization ?? 0;
+  const pct5h = util5h / 100;
+  const pct7d = util7d / 100;
+  const reset5h = u.five_hour?.resets_at || null;
   const ctl = readControl();
   const base = {
-    combined5hUSD: +cost5h.toFixed(2), pct5h: +pct5h.toFixed(3),
-    combined7dUSD: +cost7d.toFixed(2), pct7d: +pct7d.toFixed(3),
-    mode: ctl.mode, peerOk: peer.ok,
-    local: { cost5hUSD: local.cost5hUSD, cost7dUSD: local.cost7dUSD },
-    peer: { cost5hUSD: peer.cost5hUSD, cost7dUSD: peer.cost7dUSD, ok: peer.ok },
+    pct5h: +pct5h.toFixed(3), pct7d: +pct7d.toFixed(3),
+    util5h, util7d, reset5h, reset7d: u.seven_day?.resets_at || null,
+    sonnet7d: u.seven_day_sonnet?.utilization ?? null,
+    extraUsage: u.extra_usage?.is_enabled ? (u.extra_usage.utilization ?? null) : null,
+    mode: ctl.mode,
   };
 
   if (pct7d >= cfg.gate.weeklyStopPct)
-    return { gate: 'stop', reason: `weekly ${(pct7d * 100).toFixed(0)}% ≥ ${cfg.gate.weeklyStopPct * 100}% hard-stop`, ...base };
+    return { gate: 'stop', reason: `weekly ${util7d.toFixed(0)}% ≥ ${cfg.gate.weeklyStopPct * 100}% hard-stop`, ...base };
   if (ctl.mode === 'stop') return { gate: 'stop', reason: 'control mode=stop', ...base };
 
   let cap, why;
   if (ctl.mode === 'full') { cap = 1.0; why = 'mode=full (user override)'; }
   else {
-    const resetsBy = local.blockEndTime
-      ? tzMin(cfg.gate.tz, new Date(local.blockEndTime)) <= hhmm(cfg.gate.resetByHHMM) : false;
+    const resetsBy = reset5h ? tzMin(cfg.gate.tz, new Date(reset5h)) <= hhmm(cfg.gate.resetByHHMM) : false;
     const now = tzMin(cfg.gate.tz);
     const inWork = now >= hhmm(cfg.gate.workStartHHMM) && now < hhmm(cfg.gate.workEndHHMM);
     if (resetsBy) { cap = 1.0; why = `block resets by ${cfg.gate.resetByHHMM}`; }
@@ -126,8 +152,10 @@ function decide() {
     else { cap = 1.0; why = 'overnight'; }
   }
   const gate = pct5h < cap ? 'go' : 'pause';
-  return { gate, reason: `5h ${(pct5h * 100).toFixed(0)}% vs cap ${(cap * 100).toFixed(0)}% — ${why}`, cap, ...base };
+  return { gate, reason: `5h ${util5h.toFixed(0)}% vs cap ${(cap * 100).toFixed(0)}% — ${why}`, cap, ...base };
 }
 
-const result = MODE === 'report' ? (() => { const u = localUsage(); return { cost5hUSD: u.cost5hUSD, cost7dUSD: u.cost7dUSD }; })() : decide();
-process.stdout.write(JSON.stringify(result, MODE === 'report' ? undefined : null, MODE === 'report' ? 0 : 2) + '\n');
+const result = MODE === 'report'
+  ? await (async () => { const u = await fetchUsage(); return { util5h: u.five_hour?.utilization ?? 0, util7d: u.seven_day?.utilization ?? 0 }; })()
+  : await decide();
+process.stdout.write(JSON.stringify(result, null, MODE === 'report' ? 0 : 2) + '\n');
