@@ -1,6 +1,6 @@
 # HANDOFF → Mac: usage-gate 재설계 (ccusage $ → OAuth usage 엔드포인트)
 
-**From:** Windows 세션 · branch `feat/win-usage-oauth` · 2026-06-05
+**From:** Windows 세션 · branch `feat/win-compat` · 2026-06-05
 **What:** `scripts/usage-gate.mjs` v1(ccusage 비용+peer SSH) → **v2(Anthropic OAuth usage 엔드포인트)** 전면 교체.
 
 ## 왜 바꿨나 (윈도우에서 측정·검증함)
@@ -45,7 +45,7 @@ service 이름이 다르면(`-s` 값) 맞춰 고치거나, 안 되면 config.loc
 
 ## 맥이 할 일
 
-1. 이 브랜치(`feat/win-usage-oauth`) 받아서 `scripts/usage-gate.mjs`, `config.example.json`, `README.md` 확인.
+1. 이 브랜치(`feat/win-compat`) 받아서 `scripts/usage-gate.mjs`, `config.example.json`, `README.md` 확인.
 2. `node scripts/usage-gate.mjs` 실행 → `util7d`가 맥 `/usage` 주간%와 같은지 대조. 다르면 위 Keychain 이슈.
 3. config.local.json에서 `plan`/`peer` 키 제거(이제 무시됨). `machineId:"mac"` 유지.
 4. OK면 맥 자기 브랜치(`feat/mac-...`)에 동일 반영 → 사용자가 수동 머지.
