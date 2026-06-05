@@ -66,17 +66,28 @@ function accessToken() {
     const out = execSync(cfg.credentialsCommand, { encoding: 'utf8' }).trim();
     return out.startsWith('{') ? fromJson(out) : out;
   }
-  // 2) explicit file, or the standard per-config-dir credentials file (Win/Linux)
-  const f = cfg.credentialsFile ? resolve(cfg.credentialsFile) : join(configDir, '.credentials.json');
-  if (existsSync(f)) return fromJson(readFileSync(f, 'utf8'));
-  // 3) macOS Keychain (Claude Code stores creds here, not in a file)
-  if (platform() === 'darwin') {
-    const out = execFileSync('security',
-      ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
-      { encoding: 'utf8' }).trim();
-    return fromJson(out);
+  // 2) explicit file override
+  if (cfg.credentialsFile) {
+    const cf = resolve(cfg.credentialsFile);
+    if (existsSync(cf)) return fromJson(readFileSync(cf, 'utf8'));
   }
-  throw new Error(`no Claude credentials found (looked in ${f}${platform() === 'darwin' ? ' + Keychain' : ''})`);
+  // 3) macOS: login Keychain is the CANONICAL store. A leftover
+  //    ~/.claude/.credentials.json can be STALE (Claude Code stops refreshing the
+  //    file once it migrates to Keychain) and would shadow the live token → 401.
+  //    So on darwin, Keychain wins; the file is only a fallback.
+  if (platform() === 'darwin') {
+    try {
+      const out = execFileSync('security',
+        ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+        { encoding: 'utf8' }).trim();
+      const t = fromJson(out);
+      if (t) return t;
+    } catch { /* fall through to file */ }
+  }
+  // 4) standard per-config-dir credentials file (Win/Linux canonical; darwin fallback)
+  const f = join(configDir, '.credentials.json');
+  if (existsSync(f)) return fromJson(readFileSync(f, 'utf8'));
+  throw new Error(`no Claude credentials found (looked in ${platform() === 'darwin' ? 'Keychain + ' : ''}${f})`);
 }
 
 // claude-code/<version> User-Agent is REQUIRED — without it the endpoint uses an
