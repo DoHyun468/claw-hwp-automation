@@ -14,7 +14,8 @@
 | `hwp/para-plain.hwp` | ③④ 입력 (무스타일 문단 control) | mistake 03·04 | `~/claw-hwp-verified-fixtures/phase-a/phase_a_styling_test_NO_BG.hwp` |
 | `hwp/para-styled-ref.hwp` | ③④ **정답 ground-truth** (B8 paraShapeId=7, border_fill_id=2 회색) | mistake 03·04 | `~/claw-hwp-verified-fixtures/inputs/ktx_phase_b_styling_spec.hwp` |
 | `hwp/stripe-3clean.hwp` | ④ 3문단 plain (char-shade artifact 비교용) | mistake 04 | `~/claw-hwp-verified-fixtures/phase-a/stripe_test_three_clean.hwp` |
-| `hwpx/bullet-input.hwpx` | ⑤ 입력 (50문단 plain, **글머리 없음 + 한컴 fingerprint 보유**) | mistake 06 (web BULLET strip) | `~/Downloads/short-gov_baseline_for_kdc.hwpx` |
+| `hwpx/bullet-input.hwpx` | ⑤ 입력 (**작은** 5문단 plain, 글머리 없음 + 한컴 fingerprint 검증됨) | mistake 06 (web BULLET strip) | `~/claw-hwp-hwpx-edit/_verified_hwpx_samples/cs3_create.hwpx` (7.5KB) |
+| `hwpx/bullet-input-large.hwpx` | ⑤ fallback (50문단 plain + 표/이미지, fingerprint) | mistake 06 | `~/Downloads/short-gov_baseline_for_kdc.hwpx` (169KB) |
 
 ## 입력 vs 정답 (중요)
 
@@ -23,6 +24,7 @@
 
 ## TODO
 
-- ⑤ `bullet-input.hwpx`는 169KB/50문단 → 핀포인트(특정 문단만 글머리) 검증. 더 작은 1p/3줄 fixture가
-  필요하면 hwpx worktree에서 fingerprint 보존하며 빌드.
+- ⑤ 작은 fixture 확보됨(`bullet-input.hwpx` = cs3_create 7.5KB, 5 plain 문단). "정확히 3문단" 자르기는
+  안 함 — 검증된 파일 byte-surgery는 금지, 5↔3은 미션 검증에 무관(글머리 적용 후 web 생존 체크가 본질).
+  165KB 원본은 `bullet-input-large.hwpx`로 fallback 보존.
 - `img/sample.png` = 데모 스샷 placeholder. 실제 image-insert 의미가 중요해지면 교체.
