@@ -32,7 +32,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join, isAbsolute, dirname, extname, sep } from 'node:path';
+import { join, isAbsolute, dirname, extname, sep, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -179,14 +179,23 @@ if (isHancom) {
   } catch (e) {
     b = { ok: false, stdout: '', error: e.message };
   }
-  const captures = b.ok ? collectCaptures(workdir) : [];
+  const rawCaptures = b.ok ? collectCaptures(workdir) : [];
+  const launchedAndCaptured = !!(b.ok && rawCaptures.length);
+  // captures를 workdir 밖으로 복사한 뒤 workdir 삭제 → 복사된 auth.json(세션 토큰)을 temp에 안 남긴다.
+  let captures = rawCaptures;
+  if (rawCaptures.length) {
+    const outDir = `${workdir}-captures`;
+    mkdirSync(outDir, { recursive: true });
+    captures = rawCaptures.map((c) => { const d = join(outDir, basename(c)); try { cpSync(c, d); return d; } catch { return c; } });
+  }
+  // 보안 위생: workdir엔 복사된 auth.json(세션 토큰)+심링크가 있음 → --keep 아니면 삭제
+  if (!KEEP) { try { rmSync(workdir, { recursive: true, force: true }); } catch {} }
   // 1c-1 = manual compare: produce captures, leave pass undetermined. (1c-2 = auto judge: file/capture vs ground-truth.)
-  const launchedAndCaptured = !!(b.ok && captures.length);
   verdict = {
     pass: null, needsManualCompare: true, mode: 'capture-only (1c-1: 콜드 기동+캡처 산출, 비교 수동)',
     format: FORMAT, captures, captureCount: captures.length,
     bLaunchOk: b.ok, bError: b.error || null, bStdoutTail: (b.stdout || '').slice(-800),
-    skillDir: skillDst || null, workdir,   // hancomdocs always keeps workdir (captures live here)
+    skillDir: KEEP ? (skillDst || null) : null, workdir: KEEP ? workdir : undefined,
     note: launchedAndCaptured ? '레퍼런스 픽스처 캡처와 수동 비교 (검증②). 자동 비교 = 1c-2.' : 'B가 캡처를 못 남김 — bStdoutTail/bError 확인.',
   };
   exitCode = launchedAndCaptured ? 0 : 1;   // 0 = 파이프라인 완주(수동 판정 대기), 1 = 콜드 기동/캡처 실패
