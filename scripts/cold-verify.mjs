@@ -16,14 +16,23 @@
  *   RESTORE the cache. Cold = run B in a fresh temp dir (no dev CLAUDE.md / empty memory
  *   namespace) with normal subscription auth — NOT `--bare`.
  *
+ * HANCOMDOCS variant (--format hancomdocs): claw-hancomdocs is NOT installed as a plugin (no
+ *   cache entry), so the cache-overlay above doesn't apply. Instead we drop the worktree skill
+ *   into `<workdir>/.claude/skills/claw-hancomdocs/` and launch B with `--add-dir <workdir>`
+ *   — the documented way to load a `.claude/skills/` from a NON-repo dir (plain cwd discovery
+ *   needs a git root, which a temp dir lacks). auth.json travels with the copied scripts/ so B
+ *   has the Hancom Docs session (= a real user who ran login.js once). No local output FILE —
+ *   B edits a cloud doc; grading = capture (manual compare in 1c-1, auto judge in 1c-2).
+ *   NOTE: `--add-dir` is intentional HERE ONLY; hwp/hwpx still use the cache overlay (NOT --add-dir).
+ *
  * Usage:
  *   node cold-verify.mjs --request "<natural user ask>" --plugin <worktree>/plugins/claw-hwp \
  *        --format hwpx|hwp [--out <name|path>] [--contains "<text>"] [--tier2] [--keep] [--cache-version 1.5.4]
  */
 import { execSync } from 'node:child_process';
-import { readFileSync, existsSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, cpSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join, isAbsolute, dirname, extname } from 'node:path';
+import { join, isAbsolute, dirname, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -37,8 +46,9 @@ function arg(name, def = undefined) {
 const REQUEST = arg('request'), PLUGIN = arg('plugin'), FORMAT = (arg('format') || '').toLowerCase();
 const OUT = arg('out'), CONTAINS = arg('contains'), TIER2 = !!arg('tier2', false), KEEP = !!arg('keep', false);
 const CACHE_VERSION = arg('cache-version');
-if (!REQUEST || !PLUGIN || !['hwp', 'hwpx'].includes(FORMAT)) {
-  console.error('usage: cold-verify.mjs --request "<ask>" --plugin <worktree>/plugins/claw-hwp --format hwpx|hwp [--out p] [--contains t] [--tier2] [--keep] [--cache-version V]');
+const isHancom = FORMAT === 'hancomdocs';
+if (!REQUEST || !PLUGIN || !['hwp', 'hwpx', 'hancomdocs'].includes(FORMAT)) {
+  console.error('usage: cold-verify.mjs --request "<ask>" --plugin <worktree-root> --format hwp|hwpx|hancomdocs [--out p] [--contains t] [--tier2] [--keep] [--cache-version V]\n  hwp/hwpx   : --plugin <worktree>/plugins/claw-hwp   (cache overlay, byte Tier1)\n  hancomdocs : --plugin <claw-hancomdocs repo root>   (skills-dir + --add-dir, capture-only)');
   process.exit(2);
 }
 
@@ -77,14 +87,46 @@ function withOverlay(thunk) {
   }
 }
 
+// ---- hancomdocs: drop worktree skill into <workdir>/.claude/skills/ (B loads via --add-dir) ----
+// claw-hancomdocs isn't a published plugin → no cache to overlay. Copy SKILL.md + scripts
+// (incl. machine auth.json) into a temp skills dir; symlink node_modules (deps already on machine).
+function overlaySkillsDir(wd, repoRoot) {
+  const dst = join(wd, '.claude', 'skills', 'claw-hancomdocs');
+  mkdirSync(dst, { recursive: true });
+  const skill = join(repoRoot, 'SKILL.md');
+  if (!existsSync(skill)) throw new Error(`claw-hancomdocs SKILL.md not found at ${skill} (pass --plugin <claw-hancomdocs repo root>)`);
+  cpSync(skill, join(dst, 'SKILL.md'));
+  const scriptsSrc = join(repoRoot, 'scripts');
+  if (!existsSync(join(scriptsSrc, 'auth.json'))) throw new Error(`auth.json missing in ${scriptsSrc} — run login.js (B needs the Hancom Docs session)`);
+  // copy scripts but skip heavy/irrelevant dirs; auth.json IS copied (B needs the session)
+  cpSync(scriptsSrc, join(dst, 'scripts'), { recursive: true, filter: (s) => {
+    const rel = s.slice(scriptsSrc.length);
+    return !rel.includes(`${sep}node_modules`) && !rel.includes(`${sep}captures`);
+  } });
+  // deps already installed on the machine → symlink instead of copying hundreds of MB
+  const nm = join(scriptsSrc, 'node_modules');
+  if (existsSync(nm)) { try { symlinkSync(nm, join(dst, 'scripts', 'node_modules')); } catch {} }
+  return dst;
+}
+
+// hancomdocs: collect B's capture PNGs (skill self-check output) for compare
+function collectCaptures(wd) {
+  const capDir = join(wd, '.claude', 'skills', 'claw-hancomdocs', 'scripts', 'captures');
+  if (!existsSync(capDir)) return [];
+  try { return readdirSync(capDir).filter(f => f.toLowerCase().endsWith('.png')).map(f => join(capDir, f)); } catch { return []; }
+}
+
 // ---- cold temp workdir + output path ----
 const workdir = join(tmpdir(), `claw-cold-${Date.now()}-${process.pid}`);
 mkdirSync(workdir, { recursive: true });
 const outPath = OUT ? (isAbsolute(OUT) ? OUT : join(workdir, OUT)) : join(workdir, `output.${FORMAT}`);
-const fullRequest = `${REQUEST}\n\n(자동검증: claw-hwp skill을 사용해서 작업하고, 최종 결과 파일을 정확히 이 경로에 저장: ${outPath})`;
+const fullRequest = isHancom
+  ? `${REQUEST}\n\n(자동검증: claw-hancomdocs 스킬로 작업해. doctor.js부터 돌리고, 스킬 지시대로 캡처로 결과를 남겨. 로컬 파일 저장 안 해도 됨 — 검증은 캡처로 한다.)`
+  : `${REQUEST}\n\n(자동검증: claw-hwp skill을 사용해서 작업하고, 최종 결과 파일을 정확히 이 경로에 저장: ${outPath})`;
 
 function runColdB() {
-  const cmd = `${cv.claudeBin} -p --model ${cv.model} ${(cv.extraArgs || []).join(' ')}`;
+  const addDir = isHancom ? `--add-dir "${workdir}" ` : '';   // hancomdocs: load .claude/skills/ from temp (non-repo) workdir
+  const cmd = `${cv.claudeBin} -p --model ${cv.model} ${addDir}${(cv.extraArgs || []).join(' ')}`;
   try {
     const stdout = execSync(cmd, { cwd: workdir, input: fullRequest, encoding: 'utf8', timeout: cv.timeoutMs, stdio: ['pipe', 'pipe', 'pipe'] });
     return { ok: true, stdout };
@@ -126,19 +168,43 @@ function tier2(file) {
   } catch (e) { return { pass: false, error: `capture failed: ${(e.message || '').slice(0, 200)}` }; }
 }
 
-// ---- run (B inside cache overlay) ----
-let b, file, t1, t2;
-try {
-  b = withOverlay(() => runColdB());
-} catch (e) {
-  b = { ok: false, stdout: '', error: e.message };
+// ---- run ----
+let verdict, exitCode;
+if (isHancom) {
+  // hancomdocs: skills-dir overlay (no cache, no byte Tier1). B edits a cloud doc; grade = capture.
+  let b, skillDst;
+  try {
+    skillDst = overlaySkillsDir(workdir, PLUGIN);
+    b = runColdB();
+  } catch (e) {
+    b = { ok: false, stdout: '', error: e.message };
+  }
+  const captures = b.ok ? collectCaptures(workdir) : [];
+  // 1c-1 = manual compare: produce captures, leave pass undetermined. (1c-2 = auto judge: file/capture vs ground-truth.)
+  const launchedAndCaptured = !!(b.ok && captures.length);
+  verdict = {
+    pass: null, needsManualCompare: true, mode: 'capture-only (1c-1: 콜드 기동+캡처 산출, 비교 수동)',
+    format: FORMAT, captures, captureCount: captures.length,
+    bLaunchOk: b.ok, bError: b.error || null, bStdoutTail: (b.stdout || '').slice(-800),
+    skillDir: skillDst || null, workdir,   // hancomdocs always keeps workdir (captures live here)
+    note: launchedAndCaptured ? '레퍼런스 픽스처 캡처와 수동 비교 (검증②). 자동 비교 = 1c-2.' : 'B가 캡처를 못 남김 — bStdoutTail/bError 확인.',
+  };
+  exitCode = launchedAndCaptured ? 0 : 1;   // 0 = 파이프라인 완주(수동 판정 대기), 1 = 콜드 기동/캡처 실패
+} else {
+  // hwp/hwpx: cache overlay + byte Tier1 (+ optional Tier2 capture)
+  let b, file, t1, t2;
+  try {
+    b = withOverlay(() => runColdB());
+  } catch (e) {
+    b = { ok: false, stdout: '', error: e.message };
+  }
+  file = b.ok ? findOutput() : null;
+  t1 = b.ok ? tier1(file) : { pass: false, reason: b.error };
+  t2 = (b.ok && t1.pass && TIER2) ? tier2(file) : { skipped: true, reason: TIER2 ? 'skipped (Tier1 failed)' : 'Tier2 not requested' };
+  const pass = !!(t1.pass && (t2.skipped || t2.pass));
+  verdict = { pass, format: FORMAT, output: file, tier1: t1, tier2: t2, bLaunchOk: b.ok, bStdoutTail: (b.stdout || '').slice(-800), workdir: KEEP ? workdir : undefined };
+  if (!KEEP) { try { rmSync(workdir, { recursive: true, force: true }); } catch {} }
+  exitCode = pass ? 0 : 1;
 }
-file = b.ok ? findOutput() : null;
-t1 = b.ok ? tier1(file) : { pass: false, reason: b.error };
-t2 = (b.ok && t1.pass && TIER2) ? tier2(file) : { skipped: true, reason: TIER2 ? 'skipped (Tier1 failed)' : 'Tier2 not requested' };
-const pass = !!(t1.pass && (t2.skipped || t2.pass));
-
-const verdict = { pass, format: FORMAT, output: file, tier1: t1, tier2: t2, bLaunchOk: b.ok, bStdoutTail: (b.stdout || '').slice(-800), workdir: KEEP ? workdir : undefined };
-if (!KEEP) { try { rmSync(workdir, { recursive: true, force: true }); } catch {} }
 process.stdout.write(JSON.stringify(verdict, null, 2) + '\n');
-process.exit(pass ? 0 : 1);
+process.exit(exitCode);
