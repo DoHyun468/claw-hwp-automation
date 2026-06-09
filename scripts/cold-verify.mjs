@@ -46,9 +46,10 @@ function arg(name, def = undefined) {
 const REQUEST = arg('request'), PLUGIN = arg('plugin'), FORMAT = (arg('format') || '').toLowerCase();
 const OUT = arg('out'), CONTAINS = arg('contains'), TIER2 = !!arg('tier2', false), KEEP = !!arg('keep', false);
 const CACHE_VERSION = arg('cache-version');
+const EXPECT = arg('expect');   // 1c-2: 기대결과 텍스트 → vision judge가 캡처와 비교(검증② 자동)
 const isHancom = FORMAT === 'hancomdocs';
 if (!REQUEST || !PLUGIN || !['hwp', 'hwpx', 'hancomdocs'].includes(FORMAT)) {
-  console.error('usage: cold-verify.mjs --request "<ask>" --plugin <worktree-root> --format hwp|hwpx|hancomdocs [--out p] [--contains t] [--tier2] [--keep] [--cache-version V]\n  hwp/hwpx   : --plugin <worktree>/plugins/claw-hwp   (cache overlay, byte Tier1)\n  hancomdocs : --plugin <claw-hancomdocs repo root>   (skills-dir + --add-dir, capture-only)');
+  console.error('usage: cold-verify.mjs --request "<ask>" --plugin <worktree-root> --format hwp|hwpx|hancomdocs [--out p] [--contains t] [--tier2] [--keep] [--cache-version V] [--expect "<기대결과>"]\n  hwp/hwpx   : --plugin <worktree>/plugins/claw-hwp   (cache overlay, byte Tier1)\n  hancomdocs : --plugin <claw-hancomdocs repo root>   (skills-dir + --add-dir, capture-only; --expect → vision judge 자동 비교)');
   process.exit(2);
 }
 
@@ -168,6 +169,30 @@ function tier2(file) {
   } catch (e) { return { pass: false, error: `capture failed: ${(e.message || '').slice(0, 200)}` }; }
 }
 
+// 1c-2: vision judge — 별도 claude -p가 B의 캡처를 직접 보고 기대결과 만족 여부를 판정(검증② 자동).
+function judgeCaptures(caps, expectText) {
+  if (!caps.length) return { match: false, reason: 'no captures to judge' };
+  const dirs = [...new Set(caps.map((c) => dirname(c)))].map((d) => `--add-dir "${d}"`).join(' ');
+  const list = caps.map((c, i) => `  ${i + 1}. ${c}`).join('\n');
+  const prompt = [
+    '너는 한컴독스 편집/렌더 결과를 검증하는 판정자다. 아래 캡처 이미지를 Read 도구로 직접 열어서 본다.',
+    '', `기대 결과(EXPECTED): ${expectText}`, '',
+    '실제 캡처(ACTUAL) 경로:', list, '',
+    '이 캡처들이 기대 결과를 만족하는가? 이미지에 실제로 보이는 것만 근거로 판단(추측 금지).',
+    '반드시 마지막에 JSON 한 줄만: {"match": true|false, "reason": "<한 줄 근거>"}',
+  ].join('\n');
+  try {
+    const cmd = `${cv.claudeBin} -p --model ${cv.model} ${dirs} ${(cv.extraArgs || []).join(' ')}`;
+    const stdout = execSync(cmd, { input: prompt, encoding: 'utf8', timeout: cv.timeoutMs, stdio: ['pipe', 'pipe', 'pipe'] });
+    const m = stdout.match(/\{[^{}]*"match"[^{}]*\}/);
+    if (!m) return { match: false, reason: 'judge가 JSON을 안 냄', raw: stdout.slice(-300) };
+    const j = JSON.parse(m[0]);
+    return { match: !!j.match, reason: j.reason || '', raw: stdout.slice(-150) };
+  } catch (e) {
+    return { match: false, reason: `judge 실행 실패: ${(e.message || '').slice(0, 200)}` };
+  }
+}
+
 // ---- run ----
 let verdict, exitCode;
 if (isHancom) {
@@ -190,15 +215,19 @@ if (isHancom) {
   }
   // 보안 위생: workdir엔 복사된 auth.json(세션 토큰)+심링크가 있음 → --keep 아니면 삭제
   if (!KEEP) { try { rmSync(workdir, { recursive: true, force: true }); } catch {} }
-  // 1c-1 = manual compare: produce captures, leave pass undetermined. (1c-2 = auto judge: file/capture vs ground-truth.)
+  // 검증: --expect 있으면 1c-2 vision judge로 자동 비교②, 없으면 1c-1 수동.
+  const judge = (EXPECT && captures.length) ? judgeCaptures(captures, EXPECT) : null;
+  const pass = EXPECT ? !!(judge && judge.match) : null;
   verdict = {
-    pass: null, needsManualCompare: true, mode: 'capture-only (1c-1: 콜드 기동+캡처 산출, 비교 수동)',
-    format: FORMAT, captures, captureCount: captures.length,
+    pass, needsManualCompare: !EXPECT,
+    mode: EXPECT ? 'capture-judge (1c-2: vision judge 자동 비교②)' : 'capture-only (1c-1: 콜드 기동+캡처 산출, 비교 수동)',
+    format: FORMAT, captures, captureCount: captures.length, expect: EXPECT || null, judge,
     bLaunchOk: b.ok, bError: b.error || null, bStdoutTail: (b.stdout || '').slice(-800),
     skillDir: KEEP ? (skillDst || null) : null, workdir: KEEP ? workdir : undefined,
-    note: launchedAndCaptured ? '레퍼런스 픽스처 캡처와 수동 비교 (검증②). 자동 비교 = 1c-2.' : 'B가 캡처를 못 남김 — bStdoutTail/bError 확인.',
+    note: !launchedAndCaptured ? 'B가 캡처를 못 남김 — bStdoutTail/bError 확인.'
+      : (EXPECT ? (pass ? 'judge PASS (검증② 자동)' : `judge FAIL: ${judge && judge.reason}`) : '레퍼런스와 수동 비교 (검증②). 자동 비교는 --expect.'),
   };
-  exitCode = launchedAndCaptured ? 0 : 1;   // 0 = 파이프라인 완주(수동 판정 대기), 1 = 콜드 기동/캡처 실패
+  exitCode = !launchedAndCaptured ? 1 : (EXPECT ? (pass ? 0 : 1) : 0);   // EXPECT: judge가 pass 결정 / 무-EXPECT: 캡처 산출=0(수동)
 } else {
   // hwp/hwpx: cache overlay + byte Tier1 (+ optional Tier2 capture)
   let b, file, t1, t2;
