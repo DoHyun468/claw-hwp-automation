@@ -151,9 +151,16 @@ function tier1(file) {
   if (FORMAT === 'hwpx') { if (!(buf[0] === 0x50 && buf[1] === 0x4b)) return { pass: false, reason: 'not a ZIP (hwpx)' }; }
   else { const m = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]; if (!m.every((b, i) => buf[i] === b)) return { pass: false, reason: 'not CFB/OLE (hwp)' }; }
   if (CONTAINS) {
-    let inner = '';
-    try { inner = FORMAT === 'hwpx' ? execSync(`unzip -p "${file}"`, { encoding: 'latin1', stdio: ['ignore', 'pipe', 'ignore'] }) : buf.toString('utf16le'); } catch {}
-    const found = inner.includes(CONTAINS) || inner.includes(Buffer.from(CONTAINS, 'utf16le').toString('latin1'));
+    // hwpx = UTF-8 XML(ZIP), hwp = UTF-16LE(CFB). 한글이 깨지지 않게 포맷별 인코딩으로 매칭.
+    let found = false;
+    try {
+      if (FORMAT === 'hwpx') {
+        const inner = execSync(`unzip -p "${file}"`, { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+        found = inner.includes(Buffer.from(CONTAINS, 'utf8'));   // ZIP 내부 XML = UTF-8 바이트 비교
+      } else {
+        found = buf.toString('utf16le').includes(CONTAINS);      // hwp = UTF-16LE
+      }
+    } catch {}
     if (!found) return { pass: false, reason: `expected content not found: "${CONTAINS}"`, file, bytes: buf.length };
   }
   return { pass: true, reason: `structural OK (${FORMAT}${CONTAINS ? ' + content' : ''})`, file, bytes: buf.length };
