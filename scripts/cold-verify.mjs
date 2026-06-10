@@ -179,13 +179,19 @@ function tier2(file) {
 // 1c-2: vision judge — 별도 claude -p가 B의 캡처를 직접 보고 기대결과 만족 여부를 판정(검증② 자동).
 function judgeCaptures(caps, expectText) {
   if (!caps.length) return { match: false, reason: 'no captures to judge' };
-  const dirs = [...new Set(caps.map((c) => dirname(c)))].map((d) => `--add-dir "${d}"`).join(' ');
-  const list = caps.map((c, i) => `  ${i + 1}. ${c}`).join('\n');
+  // 촬영 시간순 정렬(오래된→최신) → 마지막 = 최종 결과. 값-덮어쓰기 op에서 before(옛값)+after(새값) 공존 시
+  // judge가 "모순"으로 오판하던 false-negative 방지.
+  const ordered = [...caps].sort((a, b) => { try { return statSync(a).mtimeMs - statSync(b).mtimeMs; } catch { return 0; } });
+  const dirs = [...new Set(ordered.map((c) => dirname(c)))].map((d) => `--add-dir "${d}"`).join(' ');
+  const list = ordered.map((c, i) => `  ${i + 1}. ${c}${i === ordered.length - 1 ? '   ← 최종 결과(판정 기준)' : ''}`).join('\n');
   const prompt = [
     '너는 한컴독스 편집/렌더 결과를 검증하는 판정자다. 아래 캡처 이미지를 Read 도구로 직접 열어서 본다.',
     '', `기대 결과(EXPECTED): ${expectText}`, '',
-    '실제 캡처(ACTUAL) 경로:', list, '',
-    '이 캡처들이 기대 결과를 만족하는가? 이미지에 실제로 보이는 것만 근거로 판단(추측 금지).',
+    '실제 캡처(ACTUAL) — 촬영 시간순(오래된→최신):', list, '',
+    '판정 규칙:',
+    '- **마지막(최종) 캡처 = 편집 후 최종 상태.** 그게 기대 결과를 만족하면 match:true.',
+    '- 편집 op은 문서 상태를 바꾸므로 **이전 캡처가 옛 값/편집 전을 보여도 모순이 아니다**(정상). 이전·최종 캡처가 다르다고 false로 판정하지 마라.',
+    '- 이미지에 실제로 보이는 것만 근거로(추측 금지). **최종 캡처 기준**으로 판단.',
     '반드시 마지막에 JSON 한 줄만: {"match": true|false, "reason": "<한 줄 근거>"}',
   ].join('\n');
   try {
